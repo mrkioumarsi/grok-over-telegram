@@ -1,6 +1,6 @@
-# Grok Builder Telegram
+# Grok Over Telegram
 
-Connect Grok Builder to a Telegram bot. You chat in Telegram. Grok Builder runs on your own Ubuntu server.
+Grok Over Telegram connects Grok Builder to a Telegram bot. You chat in Telegram. Grok runs on your own Ubuntu server.
 
 Closing Telegram, or a dropped chat, does not stop the answer. The job keeps running on the server and the reply arrives when the bot can reach you again. Tap Stop when you want it to stop.
 
@@ -11,7 +11,7 @@ People you have not allowed get no reply. You, the admin, can use the whole serv
 You need Ubuntu 22.04 or newer, root access, the Grok CLI installed on that server, and a Telegram bot token from BotFather. One line:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mrkioumarsi/grok-over-telegram-bot/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/mrkioumarsi/grok-over-telegram/main/install.sh | sudo bash
 ```
 
 Then open the menu and sign in to Grok:

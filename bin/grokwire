@@ -123,9 +123,9 @@ cmd_doctor() {
     check "local firewall" "iptables -C OUTPUT -m owner --gid-owner $(box_gid) -d 127.0.0.0/8 -j REJECT >/dev/null 2>&1"
   fi
   if [ "$ok" -eq 0 ]; then
-    echo "Grok Builder Telegram looks healthy."
+    echo "Grok Over Telegram looks healthy."
   else
-    echo "Grok Builder Telegram needs attention."
+    echo "Grok Over Telegram needs attention."
   fi
   return "$ok"
 }
@@ -152,7 +152,7 @@ cmd_uninstall() {
   if [ "$workspaces" -eq 1 ]; then
     rm -rf "$WWW"
   fi
-  echo "Grok Builder Telegram was removed. Workspaces stay unless you passed --purge-workspaces."
+  echo "Grok Over Telegram was removed. Workspaces stay unless you passed --purge-workspaces."
 }
 
 usage() {
@@ -182,7 +182,7 @@ show_menu() {
   clear 2>/dev/null || true
   cat << EOF
 
-${g}Grok Builder Telegram${p}
+${g}Grok Over Telegram${p}
 Connect Grok Builder to a Telegram bot.
 
 ${g}  0.${p} Exit

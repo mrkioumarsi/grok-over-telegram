@@ -12,7 +12,7 @@ if ! grep -qi ubuntu /etc/os-release; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
-REPO="https://github.com/mrkioumarsi/grok-over-telegram-bot.git"
+REPO="https://github.com/mrkioumarsi/grok-over-telegram.git"
 SRC=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -118,5 +118,5 @@ if systemctl list-unit-files | grep -q '^grokbot.service'; then
   systemctl disable --now grokbot || true
 fi
 systemctl enable --now grokwire
-echo "Grok Builder Telegram is installed. Open the menu with: grokwire"
+echo "Grok Over Telegram is installed. Open the menu with: grokwire"
 echo "Sign in to Grok from the menu if this server is not signed in yet."

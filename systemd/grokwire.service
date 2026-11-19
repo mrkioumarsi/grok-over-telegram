@@ -1,5 +1,5 @@
 [Unit]
-Description=Grok Builder Telegram bridge
+Description=Grok Over Telegram bridge
 After=network-online.target
 Wants=network-online.target
 
