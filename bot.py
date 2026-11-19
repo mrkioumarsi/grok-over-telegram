@@ -28,8 +28,7 @@ from telegram import (
     MenuButtonDefault,
     Update,
 )
-from telegram.constants import ChatAction
-from telegram.error import BadRequest, Forbidden, RetryAfter
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -78,6 +77,8 @@ RULES_USER = (
 )
 
 RUNNING: dict[int, asyncio.subprocess.Process] = {}
+JOBS = DATA / "jobs"
+WATCHING: set[int] = set()
 CHAT_LOCKS: dict[int, asyncio.Lock] = {}
 WORLD = asyncio.Semaphore(1)
 PENDING: dict[int, str] = {}
@@ -914,13 +915,106 @@ def delete_session_dir(workspace: str, session_id: str) -> bool:
     return True
 
 
+def job_token(cid: int) -> str:
+    return str(cid).replace("-", "n")
+
+
+def job_dir(cid: int) -> Path:
+    return JOBS / job_token(cid)
+
+
+def unit_for(cid: int) -> str:
+    return f"grokwire-job-{job_token(cid)}"
+
+
+def unit_state(unit: str) -> str:
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", unit, "-p", "ActiveState", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip()
+
+
+def unit_active(unit: str) -> bool:
+    return unit_state(unit) == "active"
+
+
+def job_open(cid: int) -> bool:
+    folder = job_dir(cid)
+    if (folder / "stopped").is_file():
+        return False
+    state = load_json(folder / "state.json", {}) if (folder / "state.json").is_file() else {}
+    if state and not state.get("delivered") and not state.get("stopped"):
+        return True
+    return unit_active(unit_for(cid))
+
+
 def chat_busy(chat_id: str) -> bool:
     try:
         cid = int(chat_id)
     except ValueError:
         return False
-    proc = RUNNING.get(cid)
-    return proc is not None and proc.returncode is None
+    if cid in WATCHING:
+        return True
+    return job_open(cid)
+
+
+def another_job_running(cid: int) -> bool:
+    if not JOBS.is_dir():
+        return False
+    for path in JOBS.glob("*/state.json"):
+        state = load_json(path, {})
+        try:
+            other = int(state.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+        if other == cid or not state or state.get("delivered") or state.get("stopped"):
+            continue
+        if (path.parent / "stopped").is_file():
+            continue
+        return True
+    return False
+
+
+def stop_job(cid: int) -> bool:
+    folder = job_dir(cid)
+    active = cid in WATCHING or unit_active(unit_for(cid)) or (
+        (folder / "state.json").is_file() and not load_json(folder / "state.json", {}).get("delivered")
+    )
+    if not active:
+        return False
+    folder.mkdir(parents=True, exist_ok=True)
+    os.chmod(folder, 0o700)
+    (folder / "stopped").write_text("1\n", encoding="utf-8")
+    os.chmod(folder / "stopped", 0o600)
+    state = load_json(folder / "state.json", {})
+    if state:
+        state["stopped"] = True
+        state["delivered"] = True
+        save_json(folder / "state.json", state)
+    try:
+        subprocess.run(
+            ["systemctl", "stop", unit_for(cid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=25,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        log.exception("stop failed chat %s", cid)
+    proc = RUNNING.pop(cid, None)
+    if proc is not None and proc.returncode is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.terminate()
+    return True
 
 
 def assigned_workspace(uid: str) -> str:
@@ -1053,12 +1147,7 @@ async def handle_menu(query, update: Update, action: str) -> None:
         await show_screen(query, status_body(update), menu_payload(update)[1])
         return
     if action == "stop":
-        proc = RUNNING.get(chat.id)
-        if proc is None or proc.returncode is not None:
-            note = "⏹ Nothing is being written right now."
-        else:
-            await stop_proc(proc)
-            note = "⏹ Answer stopped."
+        note = "⏹ Answer stopped." if stop_job(chat.id) else "⏹ Nothing is being written right now."
         text, markup = menu_payload(update)
         await show_screen(query, note + "\n\n" + text, markup)
         return
@@ -1413,11 +1502,9 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not can_use(update):
         await deny(update, context)
         return
-    proc = RUNNING.get(update.effective_chat.id)
-    if proc is None or proc.returncode is not None:
+    if not stop_job(update.effective_chat.id):
         await reply(update, "⏹ Nothing is being written right now.", menu_markup(update))
         return
-    await stop_proc(proc)
     await reply(update, "⏹ Answer stopped.", menu_markup(update))
 
 
@@ -1621,11 +1708,11 @@ async def safe_edit(message, text: str, markup=None) -> None:
         await asyncio.sleep(float(exc.retry_after) + 0.2)
         try:
             await message.edit_text(body, **extra)
-        except BadRequest:
+        except TelegramError:
             pass
-    except BadRequest as exc:
+    except TelegramError as exc:
         if "not modified" not in str(exc).lower():
-            log.info("edit skipped: %s", exc)
+            log.info("edit skipped")
 
 
 async def push_chunks(bot, chat_id: int, reply_to: int, text: str, markup=None) -> None:
@@ -1860,14 +1947,389 @@ async def deliver(message, status, answer: str, markup) -> None:
     await push_chunks(message.get_bot(), message.chat_id, message.message_id, body[3900:], markup)
 
 
+def clear_job_output(folder: Path) -> None:
+    for name in ("stdout", "stderr", "exit", "stopped"):
+        path = folder / name
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def launch_job(folder: Path, argv: list[str], cwd: str, env: dict) -> None:
+    clear_job_output(folder)
+    save_json(folder / "argv.json", {"argv": argv, "cwd": cwd, "env": env})
+    state_path = folder / "state.json"
+    state = load_json(state_path, {})
+    if state.get("stopped"):
+        state["stopped"] = False
+        save_json(state_path, state)
+    unit = unit_for(int(state["chat_id"]))
+    subprocess.run(
+        ["systemctl", "stop", unit],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=20,
+        check=False,
+    )
+    subprocess.run(
+        ["systemctl", "reset-failed", unit],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    result = subprocess.run(
+        [
+            "systemd-run",
+            f"--unit={unit}",
+            "--collect",
+            "--property=Slice=system.slice",
+            f"--property=RuntimeMaxSec={MAX_RUN_SECONDS}",
+            "--property=TimeoutStopSec=20",
+            "--",
+            "/usr/bin/python3",
+            str(ROOT / "jobrun.py"),
+            str(folder),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = scrub((result.stderr or result.stdout or "systemd-run failed")[-400:])
+        log.error("job start failed: %s", detail)
+        raise RuntimeError("job start failed")
+
+
+def parse_line(raw: bytes) -> dict | None:
+    text = raw.decode("utf-8", "replace").strip()
+    if not text:
+        return None
+    try:
+        event = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
+def fold_event(answer: str, session_id, err_line: str, spent: int, tools: list[str], event: dict):
+    kind = event.get("type")
+    if kind == "text":
+        answer = absorb(answer, str(event.get("data") or ""))
+    elif kind == "tool_call":
+        hint = tool_hint(event)
+        if not tools or tools[-1] != hint:
+            tools.append(hint)
+            tools = tools[-4:]
+    elif kind == "error":
+        err_line = str(event.get("message") or "Grok error")
+    elif kind == "end":
+        session_id = event.get("sessionId") or session_id
+        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+        total = int(usage.get("total_tokens") or 0)
+        if total <= 0:
+            total = sum(int(usage.get(key) or 0) for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ))
+        spent = max(spent, total)
+        if event.get("stopReason") not in (None, "end_turn", "max_tokens"):
+            err_line = err_line or f"Stopped: {event.get('stopReason')}"
+    return answer, session_id, err_line, spent, tools
+
+
+def read_exit(folder: Path) -> int | None:
+    path = folder / "exit"
+    if not path.is_file():
+        return None
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+async def edit_or_send(bot, chat_id: int, status_id: int, text: str, markup=None) -> int | None:
+    body = (text or "…")[:4000]
+    extra = {"reply_markup": markup} if markup is not None else {}
+    if status_id:
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=status_id, text=body, **extra)
+            return status_id
+        except RetryAfter as exc:
+            await asyncio.sleep(float(exc.retry_after) + 0.2)
+            try:
+                await bot.edit_message_text(chat_id=chat_id, message_id=status_id, text=body, **extra)
+                return status_id
+            except TelegramError:
+                pass
+        except BadRequest as exc:
+            if "not modified" in str(exc).lower():
+                return status_id
+        except TelegramError:
+            pass
+    try:
+        sent = await bot.send_message(chat_id, body, **extra)
+        return sent.message_id
+    except TelegramError:
+        return None
+
+
+def remember_status(folder: Path, status_id: int) -> None:
+    state = load_json(folder / "state.json", {})
+    if not state or state.get("status_id") == status_id:
+        return
+    state["status_id"] = status_id
+    save_json(folder / "state.json", state)
+
+
+def unit_timed_out(unit: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", unit, "-p", "Result", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.stdout.strip() == "timeout"
+
+
+async def show_progress(bot, folder: Path, cid: int, text: str) -> None:
+    if (folder / "stopped").is_file():
+        return
+    state = load_json(folder / "state.json", {})
+    status_id = int(state.get("status_id") or 0)
+    chat_id = int(state.get("chat_id") or cid)
+    new_id = await edit_or_send(bot, chat_id, status_id, text)
+    if new_id and new_id != status_id:
+        remember_status(folder, new_id)
+
+
+def save_session(cid: int, session_id: str, cwd: str) -> None:
+    fresh = sessions_data()
+    slot = fresh.setdefault("chats", {}).setdefault(str(cid), {})
+    slot["session_id"] = session_id
+    if cwd:
+        slot["cwd"] = cwd
+    save_sessions(fresh)
+
+
+async def watch_job(bot, cid: int) -> dict:
+    folder = job_dir(cid)
+    stdout = folder / "stdout"
+    WATCHING.add(cid)
+    answer = ""
+    session_id = None
+    err_line = ""
+    spent = 0
+    tools: list[str] = []
+    shown = ""
+    last_edit = 0.0
+    last_status = 0.0
+    offset = 0
+    buf = b""
+    seen_active = False
+    grace_until = time.monotonic() + 8
+    try:
+        while True:
+            chunk = b""
+            if stdout.is_file():
+                with stdout.open("rb") as handle:
+                    handle.seek(offset)
+                    chunk = handle.read(262144)
+            if chunk:
+                offset += len(chunk)
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    event = parse_line(line)
+                    if event:
+                        answer, session_id, err_line, spent, tools = fold_event(
+                            answer, session_id, err_line, spent, tools, event
+                        )
+                now = time.monotonic()
+                if tools and now - last_status > 1.2:
+                    last_status = now
+                    await show_progress(bot, folder, cid, "🔎 Working\n" + "\n".join(tools))
+                if answer.strip() and answer != shown and now - last_edit > 1.4:
+                    last_edit = now
+                    shown = answer
+                    await show_progress(bot, folder, cid, scrub(answer.strip()[:3500]))
+            stopped = (folder / "stopped").is_file() or load_json(folder / "state.json", {}).get("stopped")
+            state_name = unit_state(unit_for(cid))
+            if state_name == "active":
+                seen_active = True
+            running = state_name in {"active", "activating", "deactivating"}
+            settled = seen_active or time.monotonic() > grace_until or (folder / "exit").is_file()
+            if stopped or (settled and not running):
+                if stdout.is_file():
+                    with stdout.open("rb") as handle:
+                        handle.seek(offset)
+                        rest = handle.read()
+                    if rest:
+                        offset += len(rest)
+                        buf += rest
+                        continue
+                if buf.strip():
+                    event = parse_line(buf)
+                    if event:
+                        answer, session_id, err_line, spent, tools = fold_event(
+                            answer, session_id, err_line, spent, tools, event
+                        )
+                break
+            await asyncio.sleep(0.4)
+        await asyncio.sleep(0.3)
+        code = read_exit(folder)
+        if code is None:
+            await asyncio.sleep(0.4)
+            code = read_exit(folder)
+        stderr = ""
+        err_path = folder / "stderr"
+        if err_path.is_file():
+            stderr = err_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+        stopped = (folder / "stopped").is_file() or bool(load_json(folder / "state.json", {}).get("stopped"))
+        state = load_json(folder / "state.json", {})
+        if session_id:
+            save_session(cid, str(session_id), str(state.get("cwd") or ""))
+        timed_out = (not stopped) and (
+            code in {143, 137, -15, -9} or (code is None and unit_timed_out(unit_for(cid)))
+        )
+        return {
+            "answer": answer,
+            "session_id": session_id,
+            "err_line": err_line,
+            "spent": spent,
+            "stderr": stderr,
+            "code": code,
+            "stopped": stopped,
+            "timed_out": timed_out,
+        }
+    finally:
+        WATCHING.discard(cid)
+
+
+async def deliver_ids(bot, chat_id: int, reply_to: int, status_id: int, answer: str, markup) -> int | None:
+    body = answer.strip()
+    if not body:
+        return status_id or None
+    if len(body) <= 4000:
+        return await edit_or_send(bot, chat_id, status_id, body, markup)
+    first = await edit_or_send(bot, chat_id, status_id, body[:3900])
+    if first is None:
+        return None
+    await push_chunks(bot, chat_id, reply_to, body[3900:], markup)
+    return first
+
+
+async def publish_job(bot, cid: int, result: dict) -> None:
+    folder = job_dir(cid)
+    state = load_json(folder / "state.json", {})
+    if not state or state.get("delivered") or state.get("stopped") or (folder / "stopped").is_file():
+        return
+    uid = str(state.get("user_id") or "")
+    admin = bool(state.get("admin"))
+    markup = main_menu(admin, uid)
+    chat_id = int(state["chat_id"])
+    status_id = int(state.get("status_id") or 0)
+    reply_to = int(state.get("reply_to") or 0)
+    answer = scrub(result.get("answer") or "")
+    try:
+        if answer.strip():
+            sent = await deliver_ids(bot, chat_id, reply_to, status_id, answer, markup)
+            if sent is None:
+                log.info("delivery waiting chat %s", cid)
+                return
+            if result.get("code") == 0 and not state.get("charged"):
+                charge(uid, int(result.get("spent") or 0))
+                state["charged"] = True
+        else:
+            if result.get("timed_out"):
+                detail = "⏱ This answer ran out of time. Send it again."
+            elif admin:
+                detail = scrub((result.get("err_line") or result.get("stderr") or "No answer came back. Send it again.").strip()[-800:])
+            else:
+                detail = "No answer came back. Send it again."
+            sent = await edit_or_send(bot, chat_id, status_id, detail or "No answer came back. Send it again.", markup)
+            if sent is None:
+                log.info("delivery waiting chat %s", cid)
+                return
+    except Forbidden:
+        state["delivered"] = True
+        save_json(folder / "state.json", state)
+        return
+    state["delivered"] = True
+    save_json(folder / "state.json", state)
+    for name in ("argv.json", "stdout", "stderr"):
+        try:
+            (folder / name).unlink()
+        except OSError:
+            pass
+
+
+async def finish_detached(bot, cid: int) -> None:
+    held = False
+    try:
+        await asyncio.wait_for(WORLD.acquire(), timeout=30)
+        held = True
+        state = load_json(job_dir(cid) / "state.json", {})
+        if not state or state.get("delivered") or state.get("stopped"):
+            return
+        if (job_dir(cid) / "stopped").is_file():
+            return
+        result = await watch_job(bot, cid)
+        if result.get("stopped"):
+            return
+        await publish_job(bot, cid, result)
+    except Exception:
+        log.exception("resume failed chat %s", cid)
+    finally:
+        if held:
+            WORLD.release()
+
+
+async def resume_jobs(bot) -> None:
+    if not JOBS.is_dir():
+        return
+    for state_path in sorted(JOBS.glob("*/state.json")):
+        state = load_json(state_path, {})
+        if not state or state.get("delivered") or state.get("stopped"):
+            continue
+        if (state_path.parent / "stopped").is_file():
+            continue
+        try:
+            cid = int(state["chat_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        asyncio.create_task(finish_detached(bot, cid))
+
+
+def close_job(folder: Path, note: str) -> None:
+    state = load_json(folder / "state.json", {})
+    if not state:
+        return
+    state["delivered"] = True
+    state["stopped"] = True
+    save_json(folder / "state.json", state)
+    log.info("closed job %s", note)
+
+
 async def run_turn(update: Update, prompt: str) -> None:
     chat = update.effective_chat
     message = update.message
     cid = chat.id
     lock = chat_lock(cid)
     markup = menu_markup(update)
-    if lock.locked():
+    if lock.locked() or chat_busy(str(cid)):
         await message.reply_text("⏳ Still writing the previous answer.\nTap Stop if you need to.", reply_markup=markup)
+        return
+    if another_job_running(cid):
+        await message.reply_text("⏳ I am answering someone else.\nSend it again in a moment.", reply_markup=markup)
         return
     try:
         await asyncio.wait_for(WORLD.acquire(), timeout=0.2)
@@ -1891,6 +2353,22 @@ async def run_turn(update: Update, prompt: str) -> None:
             model = profile.get("model") or DEFAULT_MODEL
             rules = RULES_ADMIN if is_admin(update.effective_user.id) else RULES_USER
             rules = f"{rules} Working directory: {cwd}."
+            admin_turn = is_admin(update.effective_user.id if update.effective_user else None)
+            status = await message.reply_text("✍️ Writing the answer…")
+            folder = job_dir(cid)
+            folder.mkdir(parents=True, exist_ok=True)
+            os.chmod(folder, 0o700)
+            save_json(folder / "state.json", {
+                "chat_id": cid,
+                "user_id": uid,
+                "reply_to": message.message_id,
+                "status_id": status.message_id,
+                "cwd": cwd,
+                "admin": admin_turn,
+                "delivered": False,
+                "charged": False,
+                "stopped": False,
+            })
             drop_resume = False
             for attempt in (1, 2):
                 session_id = None if drop_resume else row.get("session_id")
@@ -1912,12 +2390,8 @@ async def run_turn(update: Update, prompt: str) -> None:
                 ]
                 if session_id:
                     cmd.extend(["--resume", session_id])
-                if status is None:
-                    status = await message.reply_text("✍️ Writing the answer…")
-                elif attempt == 2:
+                if attempt == 2:
                     await safe_edit(status, "💬 The previous chat was not found. Starting fresh.")
-
-                admin_turn = is_admin(update.effective_user.id if update.effective_user else None)
                 if admin_turn:
                     argv = cmd
                     launch_cwd = cwd
@@ -1927,50 +2401,30 @@ async def run_turn(update: Update, prompt: str) -> None:
                     launch_cwd = "/"
                     launch_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": "/nonexistent"}
                     if not argv:
-                        await safe_edit(status, "The workspace sandbox is not ready. Ask the admin to run: grokwire doctor", markup)
+                        await safe_edit(
+                            status,
+                            "The workspace sandbox is not ready. Ask the admin to run: grokwire doctor",
+                            markup,
+                        )
+                        close_job(folder, "sandbox")
                         break
-                proc = await asyncio.create_subprocess_exec(
-                    *argv,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=launch_cwd,
-                    env=launch_env,
-                    start_new_session=True,
-                    limit=16 * 1024 * 1024,
-                )
-                RUNNING[cid] = proc
-                typing = asyncio.create_task(pulse_typing(message))
-                stderr_task = asyncio.create_task(drain_stderr(proc))
                 try:
-                    answer, new_sid, err_line, spent = await asyncio.wait_for(
-                        read_stream(message, status, proc),
-                        timeout=MAX_RUN_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    await stop_proc(proc)
-                    answer, new_sid, err_line, spent = "", None, "⏱ This answer ran out of time. Send it again.", 0
-                finally:
-                    typing.cancel()
-                    stderr = await stderr_task
-                    if proc.returncode is None:
-                        await stop_proc(proc)
-                    RUNNING.pop(cid, None)
-
-                if new_sid:
-                    fresh = sessions_data()
-                    slot = fresh.setdefault("chats", {}).setdefault(str(cid), {})
-                    slot["session_id"] = new_sid
-                    slot["cwd"] = cwd
-                    save_sessions(fresh)
-                    row = slot
-
-                code = proc.returncode
+                    launch_job(folder, argv, launch_cwd, launch_env)
+                except Exception:
+                    log.exception("launch failed chat %s", cid)
+                    await safe_edit(status, "❌ The answer was not written. Send it again.", markup)
+                    close_job(folder, "launch")
+                    break
+                result = await watch_job(message.get_bot(), cid)
+                if result.get("stopped"):
+                    break
+                code = result.get("code")
                 failed_resume = (
                     attempt == 1
                     and session_id
-                    and not answer.strip()
+                    and not (result.get("answer") or "").strip()
                     and code not in (0, None)
-                    and session_missing(stderr + err_line)
+                    and session_missing((result.get("stderr") or "") + (result.get("err_line") or ""))
                 )
                 if failed_resume:
                     fresh = sessions_data()
@@ -1981,118 +2435,16 @@ async def run_turn(update: Update, prompt: str) -> None:
                     row = slot
                     drop_resume = True
                     continue
-
-                if answer.strip():
-                    await deliver(message, status, scrub(answer), markup)
-                    if code == 0:
-                        charge(uid, spent)
-                else:
-                    if admin_turn:
-                        detail = scrub((err_line or stderr or "No answer came back. Send it again.").strip()[-800:])
-                    else:
-                        detail = "No answer came back. Send it again."
-                    await safe_edit(status, detail or "No answer came back. Send it again.", markup)
-                log.info("chat %s exit %s chars %s", cid, code, len(answer))
+                await publish_job(message.get_bot(), cid, result)
+                log.info("chat %s exit %s chars %s", cid, code, len(result.get("answer") or ""))
                 break
     except Exception:
         log.exception("turn failed chat %s", cid)
-        if status:
-            await safe_edit(status, "❌ The answer was not written. Send it again.", markup)
-        else:
-            await message.reply_text("❌ The answer was not written. Send it again.", reply_markup=markup)
+        asyncio.create_task(finish_detached(message.get_bot(), cid))
     finally:
         if held:
             WORLD.release()
             held = False
-
-
-async def pulse_typing(message) -> None:
-    try:
-        while True:
-            await message.chat.send_action(ChatAction.TYPING)
-            await asyncio.sleep(4)
-    except asyncio.CancelledError:
-        return
-
-
-async def drain_stderr(proc: asyncio.subprocess.Process) -> str:
-    chunks: list[str] = []
-    size = 0
-    assert proc.stderr is not None
-    while True:
-        line = await proc.stderr.readline()
-        if not line:
-            break
-        text = line.decode("utf-8", "replace")
-        size += len(text)
-        chunks.append(text)
-        if size > 24000:
-            chunks = chunks[-20:]
-            size = sum(len(part) for part in chunks)
-    return "".join(chunks)[-4000:]
-
-
-async def read_stream(message, status, proc: asyncio.subprocess.Process):
-    assert proc.stdout is not None
-    answer = ""
-    shown = ""
-    session_id = None
-    err_line = ""
-    spent = 0
-    tools: list[str] = []
-    last_edit = 0.0
-    last_status = 0.0
-
-    while True:
-        line = await proc.stdout.readline()
-        if not line:
-            break
-        raw = line.decode("utf-8", "replace").strip()
-        if not raw:
-            continue
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        kind = event.get("type")
-        if kind == "text":
-            answer = absorb(answer, str(event.get("data") or ""))
-        elif kind == "tool_call":
-            hint = tool_hint(event)
-            if not tools or tools[-1] != hint:
-                tools.append(hint)
-                tools = tools[-4:]
-        elif kind == "error":
-            err_line = str(event.get("message") or "Grok error")
-        elif kind == "end":
-            session_id = event.get("sessionId") or session_id
-            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-            total = int(usage.get("total_tokens") or 0)
-            if total <= 0:
-                total = sum(int(usage.get(key) or 0) for key in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_read_input_tokens",
-                    "cache_creation_input_tokens",
-                ))
-            spent = max(spent, total)
-            if event.get("stopReason") not in (None, "end_turn", "max_tokens"):
-                err_line = err_line or f"Stopped: {event.get('stopReason')}"
-
-        now = time.monotonic()
-        if tools and now - last_status > 1.2:
-            last_status = now
-            await safe_edit(status, "🔎 Working\n" + "\n".join(tools))
-        if answer.strip() and answer != shown and now - last_edit > 1.4:
-            last_edit = now
-            shown = answer
-            preview = answer.strip()[:3500]
-            await safe_edit(status, preview)
-
-    await proc.wait()
-    return answer, session_id, err_line, spent
 
 
 async def hide_command_button(bot) -> None:
@@ -2151,6 +2503,7 @@ async def post_init(app: Application) -> None:
         )
     except (Forbidden, BadRequest):
         log.warning("admin has not started the bot yet")
+    asyncio.create_task(resume_jobs(app.bot))
 
 
 def main() -> None:

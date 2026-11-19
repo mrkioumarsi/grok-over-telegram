@@ -55,15 +55,32 @@ cmd_restart() { need_root; systemctl restart "$UNIT"; }
 cmd_status() { systemctl status "$UNIT" --no-pager; }
 cmd_logs() { journalctl -u "$UNIT" -n 80 --no-pager; }
 
+stop_jobs() {
+  local dir unit listed nullglob_was
+  nullglob_was="$(shopt -p nullglob)"
+  shopt -s nullglob
+  for dir in "$DATA/jobs"/*; do
+    [ -d "$dir" ] || continue
+    : > "$dir/stopped"
+    chmod 600 "$dir/stopped" || true
+    if [ -f "$dir/state.json" ]; then
+      python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p,encoding="utf-8")); d["stopped"]=True; d["delivered"]=True; json.dump(d, open(p,"w",encoding="utf-8"))' "$dir/state.json" || true
+      chmod 600 "$dir/state.json" || true
+    fi
+  done
+  eval "$nullglob_was"
+  listed="$(systemctl list-units 'grokwire-job-*' --all --no-legend --plain --no-pager 2>/dev/null || true)"
+  if [ -n "$listed" ]; then
+    while read -r unit _; do
+      [ -n "${unit:-}" ] || continue
+      systemctl stop "$unit" >/dev/null 2>&1 || true
+    done <<< "$listed"
+  fi
+}
+
 cmd_grok_stop() {
   need_root
-  local main
-  main="$(systemctl show -p MainPID --value "$UNIT" || true)"
-  if [ -z "$main" ] || [ "$main" = "0" ]; then
-    echo "GrokWire is not running."
-    return 0
-  fi
-  pkill -P "$main" 2>/dev/null || true
+  stop_jobs
   echo "Stopped the current Grok job."
 }
 
@@ -98,6 +115,7 @@ cmd_doctor() {
   check "service file" "[ -f /etc/systemd/system/grokwire.service ]"
   check "env file" "[ -f '$ENV_FILE' ]"
   check "bot" "[ -f '$ROOT/bot.py' ]"
+  check "job runner" "[ -f '$ROOT/jobrun.py' ]"
   check "auth" "[ -f /root/.grok/auth.json ]"
   check "resolv" "[ -f '$BOX/resolv.conf' ]"
   check "unit active" "systemctl is-active --quiet '$UNIT'"
@@ -105,9 +123,9 @@ cmd_doctor() {
     check "local firewall" "iptables -C OUTPUT -m owner --gid-owner $(box_gid) -d 127.0.0.0/8 -j REJECT >/dev/null 2>&1"
   fi
   if [ "$ok" -eq 0 ]; then
-    echo "GrokWire looks healthy."
+    echo "Grok Builder Telegram looks healthy."
   else
-    echo "GrokWire needs attention."
+    echo "Grok Builder Telegram needs attention."
   fi
   return "$ok"
 }
@@ -121,24 +139,25 @@ cmd_uninstall() {
       --purge-workspaces) workspaces=1; purge=1 ;;
     esac
   done
+  stop_jobs || true
   systemctl disable --now "$UNIT" 2>/dev/null || true
   rm -f /etc/systemd/system/grokwire.service
   systemctl daemon-reload
   rm -f /usr/local/bin/grokwire
   rm -rf "$ROOT/venv"
-  rm -f "$ROOT/bot.py" "$ROOT/requirements.txt" "$ROOT/install.sh"
+  rm -f "$ROOT/bot.py" "$ROOT/jobrun.py" "$ROOT/requirements.txt" "$ROOT/install.sh"
   if [ "$purge" -eq 1 ]; then
     rm -rf "$ROOT" "$BOX"
   fi
   if [ "$workspaces" -eq 1 ]; then
     rm -rf "$WWW"
   fi
-  echo "GrokWire was removed. Workspaces stay unless you passed --purge-workspaces."
+  echo "Grok Builder Telegram was removed. Workspaces stay unless you passed --purge-workspaces."
 }
 
 usage() {
   cat << 'EOF'
-GrokWire commands:
+Grok Builder Telegram commands:
   start       start the bot and enable it on boot
   stop        stop the bot
   restart     restart the bot

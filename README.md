@@ -1,17 +1,22 @@
-# GrokWire
+# Grok Builder Telegram
 
-GrokWire is a Telegram bot for Grok on Ubuntu. You chat from Telegram. Grok runs on your own server.
+Connect Grok Builder to a Telegram bot. You chat in Telegram. Grok Builder runs on your own Ubuntu server.
+
+Closing Telegram, or a dropped chat, does not stop the answer. The job keeps running on the server and the reply arrives when the bot can reach you again. Tap Stop when you want it to stop.
 
 People you have not allowed get no reply. You, the admin, can use the whole server. Everyone else is locked inside a private workspace and cannot change the system, the kernel, or local services.
 
 ## Install
 
-Ubuntu 22.04 or newer, with the Grok CLI already installed:
+Ubuntu 22.04 or newer, with the Grok CLI already installed. One line:
 
 ```bash
-git clone https://github.com/mrkioumarsi/grokwire.git
-cd grokwire
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/mrkioumarsi/grok-builder-telegram/main/install.sh | sudo bash
+```
+
+Then sign in and check the install:
+
+```bash
 sudo grokwire login
 sudo grokwire doctor
 ```
@@ -31,7 +36,7 @@ If an older `/opt/grokbot` install is on the same machine, the installer copies 
 | `sudo grokwire logs` | Show recent logs |
 | `sudo grokwire doctor` | Check Ubuntu, Grok, the sandbox, and the firewall |
 | `sudo grokwire login` | Sign in to Grok with a device code |
-| `sudo grokwire grok-stop` | Stop the answer that is being written |
+| `sudo grokwire grok-stop` | Stop the answer that is being written, even if Telegram is closed |
 | `sudo grokwire firewall` | Refresh the sandbox network rules |
 | `sudo grokwire uninstall` | Remove the service and keep workspaces |
 | `sudo grokwire uninstall --purge` | Also remove program data and sandbox homes |
@@ -44,7 +49,7 @@ Open the bot in Telegram and type. The answer continues the open chat, and the b
 - **New chat** starts a fresh chat and keeps the old ones.
 - **Chats** lists earlier chats so you can resume or delete one.
 - **Status** shows your model, messages, and usage.
-- **Stop** stops the answer that is being written.
+- **Stop** stops the answer that is being written. Closing the Telegram app does not.
 - **Model** appears when you have more than one model.
 - **Users** is the admin list. From there you allow a person, choose models, and set how many messages and how much usage they get. Zero means unlimited.
 

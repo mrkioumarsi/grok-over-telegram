@@ -11,11 +11,22 @@ if ! grep -qi ubuntu /etc/os-release; then
   exit 1
 fi
 
-SRC="$(cd "$(dirname "$0")" && pwd)"
+export DEBIAN_FRONTEND=noninteractive
+REPO="https://github.com/mrkioumarsi/grok-builder-telegram.git"
+SRC=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+if [ -z "$SRC" ] || [ ! -f "$SRC/bot.py" ] || [ ! -f "$SRC/jobrun.py" ]; then
+  apt-get update
+  apt-get install -y git ca-certificates
+  dest="$(mktemp -d)"
+  git clone --depth 1 "$REPO" "$dest/src"
+  exec bash "$dest/src/install.sh"
+fi
 ROOT="/opt/grokwire"
 BOX="/var/lib/grokwire"
 WWW="/var/www/workspaces"
-export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
 apt-get install -y python3 python3-venv python3-pip bubblewrap ca-certificates iptables
@@ -34,6 +45,7 @@ chmod 644 "$BOX/resolv.conf"
 
 install -d -o root -g root -m 700 "$ROOT" "$ROOT/data"
 install -m 644 "$SRC/bot.py" "$ROOT/bot.py"
+install -m 644 "$SRC/jobrun.py" "$ROOT/jobrun.py"
 install -m 644 "$SRC/requirements.txt" "$ROOT/requirements.txt"
 install -m 755 "$SRC/install.sh" "$ROOT/install.sh"
 install -m 755 "$SRC/bin/grokwire" /usr/local/bin/grokwire
@@ -52,10 +64,14 @@ if [ ! -f "$ROOT/.env" ]; then
     umask 077
     printf 'BOT_TOKEN=%s\nADMIN_ID=%s\nGROK_BIN=/usr/local/bin/grok\n' "$BOT_TOKEN" "$ADMIN_ID" > "$ROOT/.env"
   else
-    echo "Telegram bot token from BotFather:"
-    read -r BOT_TOKEN
-    echo "Your numeric Telegram id (this becomes the admin):"
-    read -r ADMIN_ID
+    if [ ! -r /dev/tty ]; then
+      echo "Set BOT_TOKEN and ADMIN_ID, then run the installer again."
+      exit 1
+    fi
+    echo "Telegram bot token from BotFather:" >/dev/tty
+    read -r BOT_TOKEN </dev/tty
+    echo "Your numeric Telegram id (this becomes the admin):" >/dev/tty
+    read -r ADMIN_ID </dev/tty
     umask 077
     printf 'BOT_TOKEN=%s\nADMIN_ID=%s\nGROK_BIN=/usr/local/bin/grok\n' "$BOT_TOKEN" "$ADMIN_ID" > "$ROOT/.env"
   fi
@@ -102,5 +118,5 @@ if systemctl list-unit-files | grep -q '^grokbot.service'; then
   systemctl disable --now grokbot || true
 fi
 systemctl enable --now grokwire
-echo "GrokWire is installed. Check it with: grokwire doctor"
+echo "Grok Builder Telegram is installed. Check it with: grokwire doctor"
 echo "If Grok is not signed in yet, run: grokwire login"
