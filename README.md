@@ -8,39 +8,33 @@ People you have not allowed get no reply. You, the admin, can use the whole serv
 
 ## Install
 
-Ubuntu 22.04 or newer, with the Grok CLI already installed. One line:
+You need Ubuntu 22.04 or newer, root access, the Grok CLI installed on that server, and a Telegram bot token from BotFather. One line:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mrkioumarsi/grok-builder-telegram/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/mrkioumarsi/grok-over-telegram-bot/main/install.sh | sudo bash
 ```
 
-Then sign in and check the install:
+Then open the menu and sign in to Grok:
 
 ```bash
-sudo grokwire login
-sudo grokwire doctor
+sudo grokwire
 ```
 
-The installer asks for the Telegram bot token from BotFather and your numeric Telegram id. That id is the admin. To skip the questions, set `BOT_TOKEN` and `ADMIN_ID` before you run `install.sh`.
+The installer asks for the bot token and your numeric Telegram id. That id is the admin. To skip the questions, set `BOT_TOKEN` and `ADMIN_ID` before you run the installer.
 
 If an older `/opt/grokbot` install is on the same machine, the installer copies its settings and stops that service so only one bot polls Telegram.
 
-## Commands
+## Menu
 
-| Command | What it does |
-| --- | --- |
-| `sudo grokwire start` | Start the bot and enable it on boot |
-| `sudo grokwire stop` | Stop the bot |
-| `sudo grokwire restart` | Restart the bot |
-| `sudo grokwire status` | Show the service |
-| `sudo grokwire logs` | Show recent logs |
-| `sudo grokwire doctor` | Check Ubuntu, Grok, the sandbox, and the firewall |
-| `sudo grokwire login` | Sign in to Grok with a device code |
-| `sudo grokwire grok-stop` | Stop the answer that is being written, even if Telegram is closed |
-| `sudo grokwire firewall` | Refresh the sandbox network rules |
-| `sudo grokwire uninstall` | Remove the service and keep workspaces |
-| `sudo grokwire uninstall --purge` | Also remove program data and sandbox homes |
-| `sudo grokwire uninstall --purge-workspaces` | Also delete `/var/www/workspaces` |
+`sudo grokwire` opens the menu. From there you can:
+
+- Start, stop, and restart the bot
+- Show status and logs
+- Check the install
+- Sign in to Grok
+- Stop the answer that is being written
+- Refresh the sandbox firewall
+- Uninstall, keep the workspaces, remove the program data, or delete `/var/www/workspaces`
 
 ## Use the bot
 
@@ -67,9 +61,7 @@ Each person has a folder at `/var/www/workspaces/<telegram id>`. Do not point Ng
 
 ## Uninstall
 
-```bash
-sudo grokwire uninstall
-```
+Open the menu with `sudo grokwire` and choose Uninstall. Workspaces stay unless you choose to delete them.
 
 ## Support
 

@@ -157,23 +157,112 @@ cmd_uninstall() {
 
 usage() {
   cat << 'EOF'
-Grok Builder Telegram commands:
-  start       start the bot and enable it on boot
-  stop        stop the bot
-  restart     restart the bot
-  status      show the service status
-  logs        show recent logs
-  doctor      check the install
-  login       sign in to Grok on this server
-  grok-stop   stop the current Grok answer
-  firewall    refresh sandbox network rules
-  uninstall   remove the service (--purge also removes data)
+Run: sudo grokwire
+That opens the menu.
+
+You can also pass a command:
+  start, stop, restart, status, logs, doctor, login, grok-stop, firewall, uninstall
 EOF
+}
+
+confirm() {
+  local answer
+  printf '%s [y/N]: ' "$1"
+  read -r answer </dev/tty || return 1
+  case "$answer" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+show_menu() {
+  local g p
+  g=$'\033[0;32m'
+  p=$'\033[0m'
+  clear 2>/dev/null || true
+  cat << EOF
+
+${g}Grok Builder Telegram${p}
+Connect Grok Builder to a Telegram bot.
+
+${g}  0.${p} Exit
+${g}  1.${p} Start
+${g}  2.${p} Stop
+${g}  3.${p} Restart
+${g}  4.${p} Status
+${g}  5.${p} Logs
+${g}  6.${p} Check the install
+${g}  7.${p} Sign in to Grok
+${g}  8.${p} Stop the current answer
+${g}  9.${p} Refresh the sandbox firewall
+${g} 10.${p} Uninstall
+${g} 11.${p} Uninstall and remove program data
+${g} 12.${p} Uninstall and delete workspaces
+
+EOF
+}
+
+menu() {
+  local pick
+  need_root
+  if [ ! -r /dev/tty ]; then
+    echo "Open a terminal and run: sudo grokwire"
+    exit 1
+  fi
+  while true; do
+    show_menu
+    printf 'Choose a number [0-12]: '
+    if ! read -r pick </dev/tty; then
+      echo
+      exit 0
+    fi
+    echo
+    set +e
+    case "$pick" in
+      0) exit 0 ;;
+      1) cmd_start ;;
+      2) cmd_stop ;;
+      3) cmd_restart ;;
+      4) cmd_status ;;
+      5) cmd_logs ;;
+      6) cmd_doctor ;;
+      7) cmd_login ;;
+      8) cmd_grok_stop ;;
+      9) cmd_firewall ;;
+      10)
+        if confirm "Uninstall and keep workspaces?"; then
+          cmd_uninstall
+          exit 0
+        fi
+        ;;
+      11)
+        if confirm "Uninstall and remove program data?"; then
+          cmd_uninstall --purge
+          exit 0
+        fi
+        ;;
+      12)
+        if confirm "Uninstall and delete every workspace?"; then
+          cmd_uninstall --purge-workspaces
+          exit 0
+        fi
+        ;;
+      *) echo "That number is not in the menu." ;;
+    esac
+    set -e
+    echo
+    printf 'Press Enter to return to the menu...'
+    read -r _ </dev/tty || exit 0
+  done
 }
 
 main() {
   local cmd="${1:-}"
-  shift || true
+  if [ "$#" -eq 0 ]; then
+    menu
+    exit 0
+  fi
+  shift
   case "$cmd" in
     start) cmd_start ;;
     stop) cmd_stop ;;
@@ -185,7 +274,7 @@ main() {
     grok-stop) cmd_grok_stop ;;
     firewall) cmd_firewall ;;
     uninstall) cmd_uninstall "$@" ;;
-    ""|-h|--help|help) usage ;;
+    -h|--help|help) usage ;;
     *) echo "Unknown command: $cmd"; usage; exit 1 ;;
   esac
 }
