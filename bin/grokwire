@@ -1,0 +1,174 @@
+#!/bin/bash
+# GrokWire management: start, stop, restart, status, logs, doctor, login, firewall, uninstall.
+set -euo pipefail
+
+UNIT="grokwire"
+ROOT="/opt/grokwire"
+ENV_FILE="$ROOT/.env"
+DATA="$ROOT/data"
+WWW="/var/www/workspaces"
+BOX="/var/lib/grokwire"
+
+need_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Run this as root: sudo grokwire $*"
+    exit 1
+  fi
+}
+
+box_gid() {
+  getent group grokwire | cut -d: -f3
+}
+
+rule_v4() {
+  iptables -C OUTPUT "$@" 2>/dev/null || iptables -I OUTPUT "$@"
+}
+
+rule_v6() {
+  ip6tables -C OUTPUT "$@" 2>/dev/null || ip6tables -I OUTPUT "$@"
+}
+
+cmd_firewall() {
+  need_root
+  local gid ip
+  gid="$(box_gid)"
+  if [ -z "$gid" ]; then
+    echo "Group grokwire is missing. Run install.sh first."
+    exit 1
+  fi
+  rule_v4 -m owner --gid-owner "$gid" -d 127.0.0.0/8 -j REJECT
+  rule_v4 -m owner --gid-owner "$gid" -d 10.0.0.0/8 -j REJECT
+  rule_v4 -m owner --gid-owner "$gid" -d 172.16.0.0/12 -j REJECT
+  rule_v4 -m owner --gid-owner "$gid" -d 192.168.0.0/16 -j REJECT
+  while read -r ip; do
+    case "$ip" in
+      ""|127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.30.*|172.31.*) ;;
+      *) rule_v4 -m owner --gid-owner "$gid" -d "$ip" -j REJECT ;;
+    esac
+  done < <(hostname -I)
+  rule_v6 -m owner --gid-owner "$gid" -d ::1 -j REJECT
+}
+
+cmd_start() { need_root; systemctl enable --now "$UNIT"; }
+cmd_stop() { need_root; systemctl stop "$UNIT"; }
+cmd_restart() { need_root; systemctl restart "$UNIT"; }
+cmd_status() { systemctl status "$UNIT" --no-pager; }
+cmd_logs() { journalctl -u "$UNIT" -n 80 --no-pager; }
+
+cmd_grok_stop() {
+  need_root
+  local main
+  main="$(systemctl show -p MainPID --value "$UNIT" || true)"
+  if [ -z "$main" ] || [ "$main" = "0" ]; then
+    echo "GrokWire is not running."
+    return 0
+  fi
+  pkill -P "$main" 2>/dev/null || true
+  echo "Stopped the current Grok job."
+}
+
+cmd_login() {
+  need_root
+  export HOME=/root
+  export GROK_DISABLE_AUTOUPDATER=1
+  grok login --device-code
+  if [ -f /root/.grok/auth.json ]; then
+    install -d -o root -g grokwire -m 750 "$BOX/auth"
+    install -o root -g grokwire -m 640 /root/.grok/auth.json "$BOX/auth/auth.json"
+    echo "Grok login saved for sandboxed users."
+  fi
+}
+
+cmd_doctor() {
+  local ok=0
+  check() {
+    local name="$1" cond="$2"
+    if eval "$cond"; then
+      echo "ok   $name"
+    else
+      echo "FAIL $name"
+      ok=1
+    fi
+  }
+  check "ubuntu" "grep -qi ubuntu /etc/os-release"
+  check "bwrap" "command -v bwrap >/dev/null"
+  check "runuser" "command -v runuser >/dev/null"
+  check "grok" "command -v grok >/dev/null"
+  check "group grokwire" "getent group grokwire >/dev/null"
+  check "service file" "[ -f /etc/systemd/system/grokwire.service ]"
+  check "env file" "[ -f '$ENV_FILE' ]"
+  check "bot" "[ -f '$ROOT/bot.py' ]"
+  check "auth" "[ -f /root/.grok/auth.json ]"
+  check "resolv" "[ -f '$BOX/resolv.conf' ]"
+  check "unit active" "systemctl is-active --quiet '$UNIT'"
+  if [ "$(id -u)" -eq 0 ] && [ -n "$(box_gid)" ]; then
+    check "local firewall" "iptables -C OUTPUT -m owner --gid-owner $(box_gid) -d 127.0.0.0/8 -j REJECT >/dev/null 2>&1"
+  fi
+  if [ "$ok" -eq 0 ]; then
+    echo "GrokWire looks healthy."
+  else
+    echo "GrokWire needs attention."
+  fi
+  return "$ok"
+}
+
+cmd_uninstall() {
+  need_root
+  local purge=0 workspaces=0
+  for arg in "$@"; do
+    case "$arg" in
+      --purge) purge=1 ;;
+      --purge-workspaces) workspaces=1; purge=1 ;;
+    esac
+  done
+  systemctl disable --now "$UNIT" 2>/dev/null || true
+  rm -f /etc/systemd/system/grokwire.service
+  systemctl daemon-reload
+  rm -f /usr/local/bin/grokwire
+  rm -rf "$ROOT/venv"
+  rm -f "$ROOT/bot.py" "$ROOT/requirements.txt" "$ROOT/install.sh"
+  if [ "$purge" -eq 1 ]; then
+    rm -rf "$ROOT" "$BOX"
+  fi
+  if [ "$workspaces" -eq 1 ]; then
+    rm -rf "$WWW"
+  fi
+  echo "GrokWire was removed. Workspaces stay unless you passed --purge-workspaces."
+}
+
+usage() {
+  cat << 'EOF'
+GrokWire commands:
+  start       start the bot and enable it on boot
+  stop        stop the bot
+  restart     restart the bot
+  status      show the service status
+  logs        show recent logs
+  doctor      check the install
+  login       sign in to Grok on this server
+  grok-stop   stop the current Grok answer
+  firewall    refresh sandbox network rules
+  uninstall   remove the service (--purge also removes data)
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    start) cmd_start ;;
+    stop) cmd_stop ;;
+    restart) cmd_restart ;;
+    status) cmd_status ;;
+    logs) cmd_logs ;;
+    doctor) cmd_doctor ;;
+    login) cmd_login ;;
+    grok-stop) cmd_grok_stop ;;
+    firewall) cmd_firewall ;;
+    uninstall) cmd_uninstall "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) echo "Unknown command: $cmd"; usage; exit 1 ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,19 @@
+[Unit]
+Description=GrokWire Telegram bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/grokwire
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/grokwire/.env
+ExecStartPre=/usr/local/bin/grokwire firewall
+ExecStart=/opt/grokwire/venv/bin/python /opt/grokwire/bot.py
+Restart=on-failure
+RestartSec=4
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
