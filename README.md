@@ -32,6 +32,8 @@ If an older `/opt/grokbot` install is on the same machine, the installer copies 
 - Show status and logs
 - Check the install
 - Sign in to Grok
+- Set the bot token
+- Set the admin Telegram id
 - Stop the answer that is being written
 - Refresh the sandbox firewall
 - Uninstall, keep the workspaces, remove the program data, or delete `/var/www/workspaces`

@@ -96,6 +96,101 @@ cmd_login() {
   fi
 }
 
+set_env_key() {
+  local key="$1" value="$2" tmp
+  need_root
+  umask 077
+  tmp="$(mktemp)"
+  if [ -f "$ENV_FILE" ]; then
+    grep -v "^${key}=" "$ENV_FILE" > "$tmp" || true
+  fi
+  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  if ! grep -q '^GROK_BIN=' "$tmp"; then
+    printf 'GROK_BIN=/usr/local/bin/grok\n' >> "$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+}
+
+env_ready() {
+  [ -f "$ENV_FILE" ] && grep -q '^BOT_TOKEN=' "$ENV_FILE" && grep -q '^ADMIN_ID=' "$ENV_FILE"
+}
+
+cmd_set_token() {
+  local token bot_id
+  need_root
+  printf 'Telegram bot token from BotFather (empty cancels): '
+  IFS= read -r -s token </dev/tty || return 1
+  echo
+  if [ -z "$token" ]; then
+    echo "Cancelled."
+    return 0
+  fi
+  if ! printf '%s' "$token" | grep -Eq '^[0-9]{6,}:[A-Za-z0-9_-]{20,}$'; then
+    echo "That is not a bot token. It looks like 123456789:AA...."
+    return 1
+  fi
+  bot_id="${token%%:*}"
+  echo "Bot id: $bot_id"
+  if ! confirm "Save this token and restart the bot?"; then
+    echo "Cancelled."
+    return 0
+  fi
+  set_env_key BOT_TOKEN "$token"
+  unset token
+  if ! env_ready; then
+    echo "Set the admin Telegram id too. The bot was not restarted."
+    return 1
+  fi
+  if cmd_restart; then
+    echo "The bot is using the new token."
+  else
+    echo "The token was saved, but the bot did not restart."
+  fi
+}
+
+cmd_set_admin() {
+  local id token_line bot_id
+  need_root
+  printf 'Your numeric Telegram id (empty cancels): '
+  IFS= read -r id </dev/tty || return 1
+  if [ -z "$id" ]; then
+    echo "Cancelled."
+    return 0
+  fi
+  if ! printf '%s' "$id" | grep -Eq '^[0-9]{5,16}$'; then
+    echo "Enter your own numeric Telegram id."
+    return 1
+  fi
+  token_line="$(grep '^BOT_TOKEN=' "$ENV_FILE" 2>/dev/null || true)"
+  bot_id="${token_line#BOT_TOKEN=}"
+  bot_id="${bot_id%%:*}"
+  unset token_line
+  if [ -n "$bot_id" ] && [ "$id" = "$bot_id" ]; then
+    echo "That number is the bot id. Enter your own Telegram id."
+    return 1
+  fi
+  if ! confirm "Make ${id} the admin and restart the bot?"; then
+    echo "Cancelled."
+    return 0
+  fi
+  set_env_key ADMIN_ID "$id"
+  if [ -d "$WWW/$id" ]; then
+    chown -R root:root "$WWW/$id"
+    chmod 700 "$WWW/$id"
+  fi
+  if ! env_ready; then
+    echo "Set the bot token too. The bot was not restarted."
+    return 1
+  fi
+  if cmd_restart; then
+    echo "Admin is now ${id}. Open the bot from that Telegram account."
+  else
+    echo "The admin id was saved, but the bot did not restart."
+  fi
+}
+
 cmd_doctor() {
   local ok=0
   check() {
@@ -161,7 +256,7 @@ Run: sudo grokwire
 That opens the menu.
 
 You can also pass a command:
-  start, stop, restart, status, logs, doctor, login, grok-stop, firewall, uninstall
+  start, stop, restart, status, logs, doctor, login, token, admin, grok-stop, firewall, uninstall
 EOF
 }
 
@@ -193,11 +288,13 @@ ${g}  4.${p} Status
 ${g}  5.${p} Logs
 ${g}  6.${p} Check the install
 ${g}  7.${p} Sign in to Grok
-${g}  8.${p} Stop the current answer
-${g}  9.${p} Refresh the sandbox firewall
-${g} 10.${p} Uninstall
-${g} 11.${p} Uninstall and remove program data
-${g} 12.${p} Uninstall and delete workspaces
+${g}  8.${p} Set the bot token
+${g}  9.${p} Set the admin Telegram id
+${g} 10.${p} Stop the current answer
+${g} 11.${p} Refresh the sandbox firewall
+${g} 12.${p} Uninstall
+${g} 13.${p} Uninstall and remove program data
+${g} 14.${p} Uninstall and delete workspaces
 
 EOF
 }
@@ -211,7 +308,7 @@ menu() {
   fi
   while true; do
     show_menu
-    printf 'Choose a number [0-12]: '
+    printf 'Choose a number [0-14]: '
     if ! read -r pick </dev/tty; then
       echo
       exit 0
@@ -227,21 +324,23 @@ menu() {
       5) cmd_logs ;;
       6) cmd_doctor ;;
       7) cmd_login ;;
-      8) cmd_grok_stop ;;
-      9) cmd_firewall ;;
-      10)
+      8) cmd_set_token ;;
+      9) cmd_set_admin ;;
+      10) cmd_grok_stop ;;
+      11) cmd_firewall ;;
+      12)
         if confirm "Uninstall and keep workspaces?"; then
           cmd_uninstall
           exit 0
         fi
         ;;
-      11)
+      13)
         if confirm "Uninstall and remove program data?"; then
           cmd_uninstall --purge
           exit 0
         fi
         ;;
-      12)
+      14)
         if confirm "Uninstall and delete every workspace?"; then
           cmd_uninstall --purge-workspaces
           exit 0
@@ -271,6 +370,8 @@ main() {
     logs) cmd_logs ;;
     doctor) cmd_doctor ;;
     login) cmd_login ;;
+    token) cmd_set_token ;;
+    admin) cmd_set_admin ;;
     grok-stop) cmd_grok_stop ;;
     firewall) cmd_firewall ;;
     uninstall) cmd_uninstall "$@" ;;
