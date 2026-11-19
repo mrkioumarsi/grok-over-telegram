@@ -21,11 +21,11 @@ box_gid() {
 }
 
 rule_v4() {
-  iptables -C OUTPUT "$@" 2>/dev/null || iptables -I OUTPUT "$@"
+  iptables -C OUTPUT "$@" >/dev/null 2>&1 || iptables -I OUTPUT "$@" >/dev/null
 }
 
 rule_v6() {
-  ip6tables -C OUTPUT "$@" 2>/dev/null || ip6tables -I OUTPUT "$@"
+  ip6tables -C OUTPUT "$@" >/dev/null 2>&1 || ip6tables -I OUTPUT "$@" >/dev/null
 }
 
 cmd_firewall() {
