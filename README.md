@@ -65,8 +65,10 @@ Each person has a folder at `/var/www/workspaces/<telegram id>`. Do not point Ng
 
 Open the menu with `sudo grokwire` and choose Uninstall. Workspaces stay unless you choose to delete them.
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ## Donate
 
-BNB Smart Chain, BEP20:
-
-0xAec9F6Ad80940a50e35F453d3354CA8379d0CFaD
+https://mrkioumarsi.ir/donate.php?lang=en
